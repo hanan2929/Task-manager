@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'notes.dart';
 import 'noteblock.dart';
+import 'OAuth.dart';
 
 // Task model
 class Task {
@@ -16,6 +17,7 @@ class Task {
   final DateTime createdAt;
   List<NoteBlock> blocks;
   bool isCompleted;
+  bool isArchived;
 
   Task({
     required this.id,
@@ -23,6 +25,7 @@ class Task {
     required this.createdAt,
     List<NoteBlock>? blocks,
     this.isCompleted = false,
+    this.isArchived = false,
   }) : blocks = blocks ?? [NoteBlock(text: "")];
 
   Map<String, dynamic> toJson() => {
@@ -31,17 +34,24 @@ class Task {
     'createdAt': createdAt.toIso8601String(),
     'blocks': blocks.map((b) => b.toJson()).toList(),
     'isCompleted': isCompleted,
+    'isArchived': isArchived,
   };
 
-  factory Task.fromJson(Map<String, dynamic> json) => Task(
-    id: json['id'],
-    title: json['title'],
-    createdAt: DateTime.parse(json['createdAt']),
-    blocks: (json['blocks'] as List)
-        .map((b) => NoteBlock.fromJson(b))
-        .toList(),
-    isCompleted: json['isCompleted'] ?? false,
-  );
+  factory Task.fromJson(Map<String, dynamic> json) {
+    return Task(
+      id: json['id'] ?? 0,
+      title: json['title'] ?? "Untitled",
+      createdAt: json['createdAt'] != null 
+          ? DateTime.parse(json['createdAt']) 
+          : DateTime.now(),
+      blocks: (json['blocks'] as List?)
+              ?.map((b) => NoteBlock.fromJson(b))
+              .toList() ?? 
+          [NoteBlock(text: "")],
+      isCompleted: json['isCompleted'] == true, // Robust check for boolean
+      isArchived: json['isArchived'] == true,   // Robust check for boolean
+    );
+  }
 }
 
 class HomeScreen extends StatefulWidget {
@@ -67,13 +77,19 @@ class _HomeScreenState extends State<HomeScreen> {
     final prefs = await SharedPreferences.getInstance();
     final String? tasksString = prefs.getString('tasks');
     if (tasksString != null) {
-      final List<dynamic> decoded = jsonDecode(tasksString);
-      setState(() {
-        _tasks = decoded.map((item) => Task.fromJson(item)).toList();
-        if (_tasks.isNotEmpty) {
-          _idCounter = _tasks.map((t) => t.id).reduce((a, b) => a > b ? a : b) + 1;
-        }
-      });
+      try {
+        final List<dynamic> decoded = jsonDecode(tasksString);
+        setState(() {
+          _tasks = decoded
+              .map((item) => Task.fromJson(item as Map<String, dynamic>))
+              .toList();
+          if (_tasks.isNotEmpty) {
+            _idCounter = _tasks.map((t) => t.id).reduce((a, b) => a > b ? a : b) + 1;
+          }
+        });
+      } catch (e) {
+        debugPrint("Error loading tasks: $e");
+      }
     }
   }
 
@@ -181,6 +197,17 @@ class _HomeScreenState extends State<HomeScreen> {
     _saveTasks();
   }
 
+  void _archiveTask(Task task) {
+    setState(() {
+      task.isArchived = true;
+    });
+    _saveTasks();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("Task moved to archive"),),
+
+    );
+  }
+
   void _confirmDelete(Task task) {
     showDialog(
       context: context,
@@ -280,6 +307,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 },
               ),
               ListTile(
+                leading: const Icon(Icons.archive, color: Colors.purple),
+                title: const Text("Move to Archive"),
+                onTap: () {
+                  Navigator.pop(context);
+                  _archiveTask(task);
+                },
+              ),
+              ListTile(
                 leading: const Icon(Icons.picture_as_pdf, color: Colors.green),
                 title: const Text("Share"),
                 onTap: () {
@@ -322,6 +357,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Filter tasks to show only non-archived ones
+    final visibleTasks = _tasks.where((t) => t.isArchived == false).toList();
+    final archivedTasks = _tasks.where((task) => task.isArchived == true).toList();
+
     return Scaffold(
       appBar: AppBar(
         leading: PopupMenuButton<String>(
@@ -333,9 +372,25 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           onSelected: (value) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text("Navigate to: $value")),
-            );
+            if (value == 'Profile') {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const OAuthScreen(),
+                ),
+              );
+            } else if (value == 'Archive') {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => ArchiveScreen(tasks: _tasks, onUpdate: _saveTasks),
+                ),
+              );
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text("Navigate to: $value")),
+              );
+            }
           },
           itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
             const PopupMenuItem<String>(
@@ -428,7 +483,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             Expanded(
-              child: _tasks.isEmpty
+              child: visibleTasks.isEmpty
                   ? const Center(
                 child: Text(
                   "No tasks yet!",
@@ -437,9 +492,9 @@ class _HomeScreenState extends State<HomeScreen> {
               )
                   : ListView.builder(
                 padding: const EdgeInsets.all(16),
-                itemCount: _tasks.length,
+                itemCount: visibleTasks.length,
                 itemBuilder: (context, index) {
-                  final task = _tasks[index];
+                  final task = visibleTasks[index];
                   return Card(
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(15),
@@ -472,6 +527,112 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// New Archive Screen
+class ArchiveScreen extends StatefulWidget {
+  final List<Task> tasks;
+  final VoidCallback onUpdate;
+  const ArchiveScreen({super.key, required this.tasks, required this.onUpdate});
+
+  @override
+  State<ArchiveScreen> createState() => _ArchiveScreenState();
+}
+
+class _ArchiveScreenState extends State<ArchiveScreen> {
+  void _showArchiveTaskOptions(Task task) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.unarchive, color: Colors.blue),
+                title: const Text("Unarchive"),
+                onTap: () {
+                  setState(() {
+                    task.isArchived = false;
+                  });
+                  widget.onUpdate();
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Task unarchived")),
+                  );
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete, color: Colors.red),
+                title: const Text("Delete"),
+                onTap: () {
+                  setState(() {
+                    widget.tasks.remove(task);
+                  });
+                  widget.onUpdate();
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Task deleted")),
+                  );
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+  @override
+  Widget build(BuildContext context) {
+    final archivedTasks = widget.tasks.where((t) => t.isArchived == true).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Archive"),
+        backgroundColor: const Color(0xFF667eea),
+        foregroundColor: Colors.white,
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF667eea), Color(0xFF764ba2)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: archivedTasks.isEmpty
+            ? const Center(
+                child: Text(
+                  "Archive is empty",
+                  style: TextStyle(color: Colors.white70, fontSize: 18),
+                ),
+              )
+            : ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: archivedTasks.length,
+                itemBuilder: (context, index) {
+                  final task = archivedTasks[index];
+                  return Card(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    elevation: 6,
+                    margin: const EdgeInsets.only(bottom: 12),
+                  child:   ListTile(
+                      title: Text(task.title),
+                      onLongPress: () => _showArchiveTaskOptions(task),
+                      trailing: const Icon(Icons.more_vert),
+                    ),
+                  );
+                },
+              ),
       ),
     );
   }
