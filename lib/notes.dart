@@ -1,8 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'homepage.dart';
-import 'noteblock.dart';
+import 'listsData.dart';
 
 class NoteScreen extends StatefulWidget {
   final Task task;
